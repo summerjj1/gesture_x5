@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gesture-x5"
+version = "0.2.0"
+description = "RDK X5 stereo-camera hand gesture recording application"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "summerjj1"}]
+
+[project.scripts]
+gesture-x5 = "gesture_x5.apps.gesture:main"
+gesture-x5-camera = "gesture_x5.apps.camera:main"
+gesture-x5-web = "gesture_x5.apps.web:main"
+
+[tool.setuptools.packages.find]
+include = ["gesture_x5*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

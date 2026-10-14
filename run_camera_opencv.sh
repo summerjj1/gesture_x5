@@ -9,4 +9,4 @@ if [[ -z "${DISPLAY:-}" && -S /tmp/.X11-unix/X0 ]]; then
 fi
 
 cd "$(dirname "$0")"
-exec /usr/bin/python3 ./camera_opencv.py "$@"
+exec /usr/bin/python3 -m gesture_x5.apps.camera "$@"

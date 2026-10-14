@@ -6,4 +6,4 @@ set -eo pipefail
 source /opt/tros/humble/setup.bash
 set -u
 cd "$(dirname "$0")"
-exec ros2 launch ./camera_web.launch.py
+exec ros2 launch ./launch/camera_web.launch.py

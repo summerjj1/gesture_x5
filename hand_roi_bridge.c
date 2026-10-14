@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +9,10 @@
 
 #define HAND_OUTPUTS 4
 #define HAND_LANDMARK_VALUES 63
+#define GESTURE_SEQUENCE_LENGTH 8
+#define GESTURE_LANDMARKS 21
+#define GESTURE_CHANNELS 3
+#define GESTURE_OUTPUTS 23
 
 typedef struct {
   hbPackedDNNHandle_t packed;
@@ -19,6 +24,15 @@ typedef struct {
   int stride;
   char error[256];
 } HandRoiContext;
+
+typedef struct {
+  hbPackedDNNHandle_t packed;
+  hbDNNHandle_t model;
+  hbDNNTensor input;
+  hbDNNTensor output;
+  int ready;
+  char error[256];
+} GestureContext;
 
 static int fail(HandRoiContext *ctx, int code, const char *where) {
   if (ctx != NULL) {
@@ -215,6 +229,190 @@ void hand_roi_destroy(void *opaque) {
   HandRoiContext *ctx = (HandRoiContext *)opaque;
   if (ctx == NULL) return;
   free_input(ctx);
+  if (ctx->packed != NULL) {
+    hbDNNRelease(ctx->packed);
+  }
+  free(ctx);
+}
+
+static int gesture_fail(GestureContext *ctx, int code, const char *where) {
+  if (ctx != NULL) {
+    snprintf(ctx->error, sizeof(ctx->error), "%s failed (%d)", where, code);
+  }
+  return code == 0 ? -1 : code;
+}
+
+static void gesture_release_tensors(GestureContext *ctx) {
+  if (ctx->input.sysMem[0].virAddr != NULL) {
+    hbSysFreeMem(&ctx->input.sysMem[0]);
+  }
+  if (ctx->output.sysMem[0].virAddr != NULL) {
+    hbSysFreeMem(&ctx->output.sysMem[0]);
+  }
+  memset(&ctx->input, 0, sizeof(ctx->input));
+  memset(&ctx->output, 0, sizeof(ctx->output));
+}
+
+void *gesture_model_create(const char *model_path) {
+  GestureContext *ctx = (GestureContext *)calloc(1, sizeof(*ctx));
+  if (ctx == NULL) {
+    return NULL;
+  }
+  const char *files[1] = {model_path};
+  int ret = hbDNNInitializeFromFiles(&ctx->packed, files, 1);
+  if (ret != 0) {
+    gesture_fail(ctx, ret, "hbDNNInitializeFromFiles");
+    return ctx;
+  }
+  const char **names = NULL;
+  int32_t count = 0;
+  ret = hbDNNGetModelNameList(&names, &count, ctx->packed);
+  if (ret != 0 || count < 1) {
+    gesture_fail(ctx, ret == 0 ? -1 : ret, "hbDNNGetModelNameList");
+    return ctx;
+  }
+  ret = hbDNNGetModelHandle(&ctx->model, ctx->packed, names[0]);
+  if (ret != 0) {
+    gesture_fail(ctx, ret, "hbDNNGetModelHandle");
+    return ctx;
+  }
+  ret = hbDNNGetInputTensorProperties(&ctx->input.properties, ctx->model, 0);
+  if (ret != 0) {
+    gesture_fail(ctx, ret, "hbDNNGetInputTensorProperties");
+    return ctx;
+  }
+  ret = hbDNNGetOutputTensorProperties(&ctx->output.properties, ctx->model, 0);
+  if (ret != 0) {
+    gesture_fail(ctx, ret, "hbDNNGetOutputTensorProperties");
+    return ctx;
+  }
+  const hbDNNTensorShape *shape = &ctx->input.properties.validShape;
+  if (ctx->input.properties.tensorType != HB_DNN_TENSOR_TYPE_S8 ||
+      shape->numDimensions != 4 || shape->dimensionSize[0] != 1 ||
+      shape->dimensionSize[1] != GESTURE_SEQUENCE_LENGTH ||
+      shape->dimensionSize[2] != GESTURE_LANDMARKS ||
+      shape->dimensionSize[3] != GESTURE_CHANNELS) {
+    gesture_fail(ctx, -1, "unexpected gesture input tensor");
+    return ctx;
+  }
+  if (ctx->output.properties.validShape.dimensionSize[3] != GESTURE_OUTPUTS) {
+    gesture_fail(ctx, -1, "unexpected gesture output tensor");
+    return ctx;
+  }
+  ret = hbSysAllocCachedMem(
+      &ctx->input.sysMem[0], (uint32_t)ctx->input.properties.alignedByteSize);
+  if (ret != 0) {
+    gesture_fail(ctx, ret, "hbSysAllocCachedMem(input)");
+    return ctx;
+  }
+  ret = hbSysAllocCachedMem(
+      &ctx->output.sysMem[0], (uint32_t)ctx->output.properties.alignedByteSize);
+  if (ret != 0) {
+    gesture_fail(ctx, ret, "hbSysAllocCachedMem(output)");
+    gesture_release_tensors(ctx);
+    return ctx;
+  }
+  ctx->ready = 1;
+  snprintf(ctx->error, sizeof(ctx->error), "ok");
+  return ctx;
+}
+
+const char *gesture_model_last_error(void *opaque) {
+  GestureContext *ctx = (GestureContext *)opaque;
+  return ctx == NULL ? "null gesture context" : ctx->error;
+}
+
+int gesture_model_ready(void *opaque) {
+  GestureContext *ctx = (GestureContext *)opaque;
+  return ctx != NULL && ctx->ready;
+}
+
+int gesture_model_infer(void *opaque, const float *features, float *logits23) {
+  GestureContext *ctx = (GestureContext *)opaque;
+  if (ctx == NULL || !ctx->ready || features == NULL || logits23 == NULL) {
+    return gesture_fail(ctx, -1, "invalid argument");
+  }
+
+  int8_t *dst = (int8_t *)ctx->input.sysMem[0].virAddr;
+  memset(dst, 0, (size_t)ctx->input.sysMem[0].memSize);
+  for (int frame = 0; frame < GESTURE_SEQUENCE_LENGTH; ++frame) {
+    for (int point = 0; point < GESTURE_LANDMARKS; ++point) {
+      for (int channel = 0; channel < GESTURE_CHANNELS; ++channel) {
+        int shift = 7;
+        if (ctx->input.properties.shift.shiftData != NULL &&
+            channel < ctx->input.properties.shift.shiftLen) {
+          shift = ctx->input.properties.shift.shiftData[channel];
+        }
+        int source = (frame * GESTURE_LANDMARKS + point) *
+                         GESTURE_CHANNELS +
+                     channel;
+        int quantized = (int)floorf(ldexpf(features[source], shift));
+        if (quantized > 127) quantized = 127;
+        if (quantized < -128) quantized = -128;
+        int offset = frame * ctx->input.properties.stride[1] +
+                     point * ctx->input.properties.stride[2] +
+                     channel * ctx->input.properties.stride[3];
+        dst[offset] = (int8_t)quantized;
+      }
+    }
+  }
+  int ret = hbSysFlushMem(&ctx->input.sysMem[0], HB_SYS_MEM_CACHE_CLEAN);
+  if (ret != 0) {
+    return gesture_fail(ctx, ret, "hbSysFlushMem(input)");
+  }
+
+  hbDNNInferCtrlParam ctrl;
+  memset(&ctrl, 0, sizeof(ctrl));
+  ctrl.bpuCoreId = HB_BPU_CORE_ANY;
+  ctrl.dspCoreId = HB_DSP_CORE_ANY;
+  ctrl.priority = HB_DNN_PRIORITY_LOWEST;
+  hbDNNTaskHandle_t task = NULL;
+  hbDNNTensor *output_ptr = &ctx->output;
+  ret = hbDNNInfer(&task, &output_ptr, &ctx->input, ctx->model, &ctrl);
+  if (ret == 0) {
+    ret = hbDNNWaitTaskDone(task, 1000);
+  }
+  if (task != NULL) {
+    hbDNNReleaseTask(task);
+  }
+  if (ret != 0) {
+    return gesture_fail(ctx, ret, "hbDNNInfer/hbDNNWaitTaskDone");
+  }
+  ret = hbSysFlushMem(&ctx->output.sysMem[0], HB_SYS_MEM_CACHE_INVALIDATE);
+  if (ret != 0) {
+    return gesture_fail(ctx, ret, "hbSysFlushMem(output)");
+  }
+
+  if (ctx->output.properties.tensorType == HB_DNN_TENSOR_TYPE_S32) {
+    const uint8_t *src = (const uint8_t *)ctx->output.sysMem[0].virAddr;
+    for (int channel = 0; channel < GESTURE_OUTPUTS; ++channel) {
+      int shift = 0;
+      if (ctx->output.properties.shift.shiftData != NULL &&
+          channel < ctx->output.properties.shift.shiftLen) {
+        shift = ctx->output.properties.shift.shiftData[channel];
+      }
+      const int32_t *value = (const int32_t *)(
+          src + channel * ctx->output.properties.stride[3]);
+      logits23[channel] = ldexpf((float)(*value), -shift);
+    }
+  } else if (ctx->output.properties.tensorType == HB_DNN_TENSOR_TYPE_F32) {
+    const uint8_t *src = (const uint8_t *)ctx->output.sysMem[0].virAddr;
+    for (int channel = 0; channel < GESTURE_OUTPUTS; ++channel) {
+      const float *value = (const float *)(
+          src + channel * ctx->output.properties.stride[3]);
+      logits23[channel] = *value;
+    }
+  } else {
+    return gesture_fail(ctx, -1, "unsupported gesture output tensor");
+  }
+  snprintf(ctx->error, sizeof(ctx->error), "ok");
+  return 0;
+}
+
+void gesture_model_destroy(void *opaque) {
+  GestureContext *ctx = (GestureContext *)opaque;
+  if (ctx == NULL) return;
+  gesture_release_tensors(ctx);
   if (ctx->packed != NULL) {
     hbDNNRelease(ctx->packed);
   }

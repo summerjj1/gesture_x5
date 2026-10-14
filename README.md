@@ -11,7 +11,7 @@
 - 使用 X5 BPU 运行 MediaPipe 手掌检测模型。
 - 使用 X5 BPU ROI 推理运行 MediaPipe 21 点手部关键点模型。
 - 绘制手掌框、7 个手掌检测点、21 点骨架和置信度。
-- 通过关键点规则识别常用手势。
+- 默认使用即时几何规则分类手势，无 warmup；官方 `gestureDet` 时序模型仅作可选对比。
 - 双手 `Palm` 定时开始录像、双手消失报警、双手 `Thumb Up` 定时结束录像。
 - 录像保存无识别标注的原始画面，截图保留识别标注便于调试。
 - 提供本地 OpenCV 窗口、无 ROS 网页预览和可选 ROS 2/TROS 预览。
@@ -41,10 +41,11 @@ CPU / OpenCV：解码、左右拆分
     │
     ├─► X5 BPU：手掌检测 192x192
     │
-    └─► X5 BPU：每只手的 21 点 ROI 推理 224x224
+    ├─► X5 BPU：每只手的 21 点 ROI 推理 224x224
+    │
              │
              ▼
-CPU / OpenCV：手势规则、绘图、显示、录像
+CPU / OpenCV：关键点几何规则分类、绘图、显示、录像
 ```
 
 ROS 是软件通信框架，不是计算硬件。手势脚本只是复用了安装在
@@ -55,31 +56,45 @@ ROS 是软件通信框架，不是计算硬件。手势脚本只是复用了安�
 
 ```text
 Gesture_X5/
-├── README.md                    # 本文档
-├── .gitignore                   # 忽略缓存、编译库、录像和截图
-├── install_dependencies.sh      # 安装模型包和运行依赖
-├── camera_opencv.py             # OpenCV 本地相机窗口及录像
-├── run_camera_opencv.sh         # 本地相机窗口启动器
-├── gesture_opencv_bpu.py        # 双路手掌、21 点及手势识别主程序
-├── hand_roi_bridge.c            # Python 调用 hbDNNRoiInfer 的 C 桥接层
-├── build_hand_roi_bridge.sh     # 编译 ROI 桥接动态库
-├── run_gesture_opencv.sh        # 手势识别启动器，首次运行自动编译桥接层
-├── camera_web.py                # 不依赖 ROS 的 MJPEG 网页预览
-├── run_camera_web.sh            # 网页预览启动器
-├── camera_web.launch.py         # TROS 相机与 websocket 启动文件
-└── run_ros_camera_web.sh        # 可选 ROS 2/TROS 网页预览启动器
+├── gesture_x5/                  # 可安装的 Python 包
+│   ├── apps/                    # 手势、相机和网页三个应用入口
+│   └── core/                    # 不依赖 BPU/OpenCV 的状态机核心
+├── native/                      # hbDNNRoiInfer C 桥接源码
+├── scripts/                     # 安装、构建与代码检查脚本
+├── launch/                      # ROS 2/TROS launch 文件
+├── tests/                       # 硬件无关单元测试
+├── build/                       # 板端动态库构建产物（自动生成）
+├── pyproject.toml               # Python 包与命令行入口定义
+├── Makefile                     # check/test/build/install 快捷目标
+├── README.md                    # 使用和维护文档
+├── run_gesture_opencv.sh        # 推荐的手势识别入口
+├── run_camera_opencv.sh         # OpenCV 相机入口
+├── run_camera_web.sh            # 无 ROS 网页入口
+├── run_ros_camera_web.sh        # 可选 ROS 2/TROS 入口
+└── *_opencv.py                  # 兼容旧调用方式的轻量入口
 ```
 
 运行后可能生成：
 
 ```text
-libhand_roi_bridge.so            # 板端编译产物
-recordings/*.avi                 # 录像
+build/libhand_roi_bridge.so      # 板端编译产物
+recordings/*.{avi,mpeg,mp4}      # 录像
 recordings/*.jpg                 # 截图
 __pycache__/                     # Python 缓存
 ```
 
 这些生成物不会提交到 Git。
+
+根目录启动脚本保持向后兼容；业务实现统一放在 `gesture_x5/`，不要再向兼容入口
+堆叠新逻辑。状态机核心可以在普通电脑上测试，不要求安装 OpenCV 或连接 X5。
+
+开发检查命令：
+
+```bash
+make check       # Python 编译、单元测试、Shell 语法检查
+make test        # 只运行状态机单元测试
+make build       # 在 X5 上编译原生桥接层
+```
 
 ## 4. 环境要求
 
@@ -107,6 +122,7 @@ ls /usr/include/dnn/hb_dnn.h /usr/lib/libdnn.so
 ```text
 /opt/tros/humble/lib/palm_detection_mediapipe/config/palm_det_192_192.bin
 /opt/tros/humble/lib/hand_landmarks_mediapipe/config/hand_224_224.bin
+/opt/tros/humble/lib/hand_gesture_detection/config/gestureDet_8x21.hbm  # 可选
 ```
 
 ### 安装手势模型包
@@ -141,25 +157,13 @@ sudo apt install -y \
   tros-humble-hand-landmarks-mediapipe
 ```
 
-其中两个 TROS 包分别提供本项目使用的手掌检测模型和 21 点关键点模型。
+这两个 TROS 包分别提供手掌检测和 21 点关键点模型。
 安装完成后，脚本还会检查 `hobot_dnn` Python 接口、模型文件和 DNN SDK，
 并编译 `libhand_roi_bridge.so`。
 
-如果还需要安装 D-Robotics 官方的 ROS 手势识别节点，可额外执行：
-
-```bash
-sudo apt install -y tros-humble-hand-gesture-detection
-```
-
-或者使用一键安装脚本的可选参数：
-
-```bash
-./install_dependencies.sh --with-ros-gesture
-```
-
-`tros-humble-hand-gesture-detection` 是官方 ROS 节点，与本项目中的
-`recognize_gesture()` 关键点规则属于两套实现。纯 OpenCV/BPU 模式不需要安装
-这个可选包。
+默认规则分类不需要 `tros-humble-hand-gesture-detection`。如需测试官方时序模型，
+再运行 `./install_dependencies.sh --with-official-gesture` 安装它；脚本只直接加载
+其中的模型文件，仍然不需要启动 ROS。
 
 检查模型包是否已经安装：
 
@@ -191,10 +195,11 @@ cd /home/sunrise/code/Gesture_X5
   --compute-eye left \
   --fps 60 \
   --detect-every 2 \
-  --max-hands 2
+  --max-hands 2 \
+  --palm-tiles 2
 ```
 
-第一次运行时，如果 `libhand_roi_bridge.so` 不存在，启动器会自动执行：
+第一次运行或 `native/hand_roi_bridge.c` 更新后，启动器会自动执行：
 
 ```bash
 ./build_hand_roi_bridge.sh
@@ -284,8 +289,8 @@ cd /home/sunrise/code/Gesture_X5
 3. 任意一只手重新出现后解除“同时消失”报警。
 4. 左镜头内至少两只手同时为 `Thumb Up`，连续保持 5 秒后结束并保存录像。
 
-`Thumb Up` 计时默认允许最多 1 秒的短暂漏检，因此单帧或少量帧识别为
-`Unknown` 不会立即清空整个进度；超过容错时间才会重新计时。
+`Palm` 和 `Thumb Up` 计时默认都允许最多 1 秒的短暂漏检，因此单帧或少量帧
+识别为 `Unknown` 不会立即清空整个进度；超过容错时间才会重新计时。
 
 使用右镜头作为控制判定源：
 
@@ -327,9 +332,26 @@ cd /home/sunrise/code/Gesture_X5
 ./run_gesture_opencv.sh --record recordings/gesture_test.avi
 ```
 
-录像使用 MJPEG AVI。显示窗口继续绘制关键点、手势名称、置信度、FPS、自动
+保存为 MPEG：
+
+```bash
+./run_gesture_opencv.sh --record-format mpeg
+```
+
+也可以直接用扩展名选择格式：
+
+```bash
+./run_gesture_opencv.sh --record recordings/gesture_test.mpeg
+./run_gesture_opencv.sh --record recordings/gesture_test.mp4
+```
+
+默认使用 MJPEG AVI；`mpeg` 使用 MPEG-2，`mp4` 使用 MPEG-4。显示窗口继续绘制
+关键点、手势名称、置信度、FPS、自动
 控制状态和报警，但这些内容不会写入视频。如果在录像过程中按 `E` 改变画面
 尺寸，程序会先结束并保存当前录像。截图仍保存当前带识别标注的显示画面。
+
+MPEG/MP4压缩比更高，但CPU编码开销通常大于MJPEG；如果识别速度明显下降，建议
+继续使用默认AVI，或降低 `--record-width`、`--record-fps`。
 
 为避免 4000×1200 MJPEG 编码再次拖慢识别，录像默认等比例缩放到 1280 宽，
 并使用开始录像时测得的实际显示帧率。保存原始分辨率或指定录像帧率：
@@ -362,14 +384,36 @@ cd /home/sunrise/code/Gesture_X5
 
 - `--detect-every N`：每 N 帧运行一次模型，其他帧复用上一次结果。
 - `--max-hands N`：每个画面最多处理 N 只手；`both` 模式左右分别计算。
+- `--palm-tiles N`：整图漏掉手时自动分块补充检测；`1` 表示关闭。
 - `--display-width N`：桌面显示的最大宽度，不改变相机采集分辨率。
 
 若需要让桌面保持高刷新率，应进一步将相机显示与 BPU 推理拆成两个线程，
 使桌面持续显示最新帧、识别线程异步更新关键点。
 
+### 实测资源占用
+
+以下数据在 RDK X5、`4000×1200 @ 60 FPS`、默认只计算左视角、最多两只手、
+未进行录像时采样。`100% CPU` 表示占满一个CPU核心；X5共有8个CPU核心。
+
+| 模式 | 手势进程CPU | 占8核总CPU | 常驻内存 | BPU占用 | CPU/BPU温度 |
+|---|---:|---:|---:|---:|---:|
+| OpenCV可视化 | 约 `174%` | 约 `21.8%` | 约 `180 MB` | 约 `3%` | `75.0/73.2°C` |
+| 无可视化 `--headless` | 约 `87.4%` | 约 `10.9%` | 约 `131 MB` | 约 `3%` | `71.7/69.8°C` |
+
+无可视化模式将CPU占用降低约50%、内存降低约27%，同时保留双手识别、自动
+录像、报警和断帧容错：
+
+```bash
+./run_gesture_opencv.sh --headless --record-format mpeg
+```
+
+MPEG正在编码时CPU占用会高于表中数值。整机占用还会受 VS Code Remote、桌面
+环境及其他后台服务影响，因此表格用于同一板卡上的相对比较。
+
 ## 9. 手势类别
 
-当前手势类别由 21 点几何规则判断，不使用额外分类模型：
+默认根据单帧 21 个关键点的伸展状态和夹角进行即时几何规则分类，不需要等待
+连续帧，也不会显示 `Warmup`：
 
 - `Palm`
 - `Victory`
@@ -381,7 +425,15 @@ cd /home/sunrise/code/Gesture_X5
 - `Mute`
 - `Unknown`
 
-规则实现在 `gesture_opencv_bpu.py` 的 `recognize_gesture()` 中，可按需求扩展。
+若需要单独测试 D-Robotics 官方 `gestureDet_8x21.hbm` 时序模型，可显式运行：
+
+```bash
+./run_gesture_opencv.sh --gesture-backend official
+```
+
+官方模式需要为每只手缓存连续 8 次关键点，刚检测到手时会显示
+`Warmup 1/8` 到 `Warmup 7/8`；轨迹中断后会重新缓存，因此不建议用于当前的
+实时双手录像控制。
 
 ## 10. 主要命令行参数
 
@@ -402,21 +454,26 @@ cd /home/sunrise/code/Gesture_X5
 | `--display-width` | `1280` | 桌面显示最大宽度 |
 | `--detect-every` | `2` | 每隔多少帧进行一次推理 |
 | `--max-hands` | `2` | 每路最多处理的手数 |
-| `--palm-score` | `0.6` | 手掌检测阈值 |
-| `--hand-score` | `0.4` | 21 点结果阈值 |
+| `--palm-score` | `0.5` | 手掌检测阈值 |
+| `--hand-score` | `0.35` | 21 点结果阈值 |
+| `--palm-tiles` | `2` | 整图不足两只手时进行水平重叠补检；`1` 关闭 |
+| `--gesture-backend` | `rules` | `rules` 即时几何规则；`official` 可选时序 BPU 分类 |
+| `--gesture-model` | 官方模型路径 | `gestureDet_8x21.hbm` 路径 |
+| `--gesture-score` | `0.5` | 官方手势分类置信度阈值 |
 | `--control-eye` | `left` | 自动录像使用的控制镜头：`left` 或 `right` |
 | `--palm-start-seconds` | `3` | 双手 Palm 触发录像所需秒数 |
 | `--missing-alarm-seconds` | `5` | 双手同时消失触发报警所需秒数 |
 | `--thumb-stop-seconds` | `5` | 双手 Thumb Up 停止录像所需秒数 |
-| `--gesture-grace-seconds` | `1` | Thumb Up 计时允许的短暂漏检秒数 |
+| `--gesture-grace-seconds` | `1` | Palm 和 Thumb Up 计时允许的短暂漏检秒数 |
 | `--no-auto-record` | 关闭 | 禁用自动录像和自动报警状态机 |
 | `--record [FILE]` | 关闭 | 启动时开始录制无标注原始画面，可指定文件 |
+| `--record-format` | `avi` | 自动录像格式：`avi`、`mpeg` 或 `mp4` |
 | `--record-dir` | `recordings` | 自动录像和截图目录 |
 | `--record-width` | `1280` | 录像最大宽度；`0` 表示相机原始宽度 |
 | `--record-fps` | 自动 | `0` 使用开始录像时测得的显示帧率 |
 | `--image FILE` | 无 | 处理单张图片，不打开相机 |
 | `--output FILE` | `gesture_result.jpg` | 单图处理输出文件 |
-| `--no-display` | 关闭 | 不创建桌面窗口 |
+| `--no-display` / `--headless` | 关闭 | 无窗口运行，并跳过画面复制、绘制和显示缩放 |
 
 ## 11. 仅查看 OpenCV 相机
 
@@ -442,6 +499,7 @@ cd /home/sunrise/code/Gesture_X5
 ```bash
 ./run_camera_opencv.sh --fps 60 --record
 ./run_camera_opencv.sh --fps 60 --record recordings/raw_camera.avi
+./run_camera_opencv.sh --fps 60 --record-format mpeg
 ```
 
 ## 12. 无 ROS 网页预览
@@ -484,7 +542,19 @@ http://192.168.0.160:8000
 
 这部分才需要 ROS 2/TROS；`run_gesture_opencv.sh` 不需要。
 
-## 14. 单张图片测试
+## 14. 无可视化运行
+
+只运行相机采集、BPU识别、自动录像和报警，不创建OpenCV窗口，也不复制或绘制
+显示画面：
+
+```bash
+./run_gesture_opencv.sh --headless --record-format mpeg
+```
+
+无可视化模式没有键盘快捷键，需要在终端按 `Ctrl+C` 退出；自动手势录像仍然有效。
+也可以使用兼容参数 `--no-display`，行为完全相同。
+
+## 15. 单张图片测试
 
 使用板上自带的官方示例图验证完整 BPU 链路：
 
@@ -498,7 +568,7 @@ http://192.168.0.160:8000
 
 正常结果应包含一个手掌和一套 21 点关键点。
 
-## 15. 常见问题
+## 16. 常见问题
 
 ### 相机无法打开
 
@@ -552,7 +622,7 @@ source /opt/tros/humble/setup.bash
 
 ```bash
 ./build_hand_roi_bridge.sh
-ldd ./libhand_roi_bridge.so
+ldd ./build/libhand_roi_bridge.so
 ```
 
 该桥接层调用 `hbDNNRoiInfer`，因为 21 点模型是 X5 的 resizer/ROI 模型，
@@ -561,9 +631,16 @@ ldd ./libhand_roi_bridge.so
 ### 有手掌框但没有 21 点
 
 - 保证手掌完整进入画面，并避免严重运动模糊。
-- 尝试将 `--hand-score` 从 `0.4` 调低到 `0.3`。
+- 尝试将 `--hand-score` 从 `0.35` 调低到 `0.25`。
 - 确认扩展后的手部区域没有被图像边界大量裁切。
 - 使用 `--eye both`，不要对双目超宽图直接使用 `--eye full`。
+
+### 画面有两只手但只识别出一只
+
+- 先看状态栏：`P` 是手掌检测数量，`H` 是通过关键点模型的手数量。
+- `P1/H1` 表示手掌模型漏检；默认 `--palm-tiles 2` 会自动进行重叠分块补检。
+- `P2/H1` 表示第二只手已找到，但关键点置信度不足，可尝试 `--hand-score 0.25`。
+- 双手尽量不要重叠，并让完整手腕和指尖都进入左视角。
 
 ### 桌面只有几 FPS
 
@@ -577,11 +654,12 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
 v4l2-ctl -d /dev/video0 --get-fmt-video --get-parm
 ```
 
-## 16. 已验证状态
+## 17. 已验证状态
 
 - 相机：`4000x1200 MJPEG @ 60 FPS` 可正常协商。
 - 手掌模型：X5 BPU 推理正常。
 - 21 点模型：`hbDNNRoiInfer` 推理正常。
+- 官方手势分类模型：`gestureDet_8x21.hbm` 通过原生 `hbDNNInfer` 调用。
 - 官方单图：检测到 1 个手掌和 1 套 21 点。
 - 左右双路测试：检测到 2 个手掌和 2 套 21 点，总推理约 48 ms。
 - OpenCV 本地窗口、截图和 MJPEG AVI 录像可用。

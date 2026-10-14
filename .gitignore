@@ -1,7 +1,11 @@
 __pycache__/
 *.py[cod]
 
+/build/
+/legacy/
 /libhand_roi_bridge.so
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
 /recordings/
 /gesture_result.jpg
-

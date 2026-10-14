@@ -7,7 +7,7 @@ if [[ -z "${DISPLAY:-}" && -S /tmp/.X11-unix/X0 ]]; then
 fi
 
 cd "$(dirname "$0")"
-if [[ ! -f ./libhand_roi_bridge.so ]]; then
+if [[ ! -f ./build/libhand_roi_bridge.so || ./native/hand_roi_bridge.c -nt ./build/libhand_roi_bridge.so ]]; then
   ./build_hand_roi_bridge.sh
 fi
-exec /usr/bin/python3 ./gesture_opencv_bpu.py "$@"
+exec /usr/bin/python3 -m gesture_x5.apps.gesture "$@"
