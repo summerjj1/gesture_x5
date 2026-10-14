@@ -392,23 +392,57 @@ MPEG/MP4压缩比更高，但CPU编码开销通常大于MJPEG；如果识别速�
 
 ### 实测资源占用
 
-以下数据在 RDK X5、`4000×1200 @ 60 FPS`、默认只计算左视角、最多两只手、
-未进行录像时采样。`100% CPU` 表示占满一个CPU核心；X5共有8个CPU核心。
+以下数据于 2026-10-14 在当前 RDK X5 上短时采样，条件为
+`4000×1200 @ 60 FPS`、`--compute-eye left`、`--max-hands 2`、
+`--detect-every 2`，手势识别已运行但尚未触发录像编码。板卡有 8 个 CPU
+核心和约 `3062 MiB` 内存。
 
-| 模式 | 手势进程CPU | 占8核总CPU | 常驻内存 | BPU占用 | CPU/BPU温度 |
-|---|---:|---:|---:|---:|---:|
-| OpenCV可视化 | 约 `174%` | 约 `21.8%` | 约 `180 MB` | 约 `3%` | `75.0/73.2°C` |
-| 无可视化 `--headless` | 约 `87.4%` | 约 `10.9%` | 约 `131 MB` | 约 `3%` | `71.7/69.8°C` |
+Linux 进程 CPU 可以超过 `100%`：`100%` 表示占满一个核心，表中的“折合整机
+CPU”按进程 CPU 除以 8 计算。RSS 是该进程的常驻物理内存，不是整机已用内存。
 
-无可视化模式将CPU占用降低约50%、内存降低约27%，同时保留双手识别、自动
-录像、报警和断帧容错：
+| 模式 | 启动参数 | 进程CPU | 折合整机CPU | RSS | BPU瞬时占用 | CPU/BPU温度 |
+|---|---|---:|---:|---:|---:|---:|
+| OpenCV可视化 | 默认 | `149–180%` | `18.6–22.5%` | `156–181 MiB` | 约 `0–3%` | 约 `74–75/73°C` |
+| 无可视化 | `--headless --record-format mpeg` | `107–118%` | `13.4–14.8%` | `144.6–144.8 MiB` | `0–1%` | `74.9–75.1/73.1–73.2°C` |
+
+本轮短时样本中，无可视化模式相对可视化模式大约减少 `20–40%` 的进程 CPU
+和 `7–20%` 的 RSS，同时保留手势识别、自动录像、报警及短暂漏检容错：
 
 ```bash
 ./run_gesture_opencv.sh --headless --record-format mpeg
 ```
 
-MPEG正在编码时CPU占用会高于表中数值。整机占用还会受 VS Code Remote、桌面
-环境及其他后台服务影响，因此表格用于同一板卡上的相对比较。
+`--record-format mpeg` 只选择录像格式；在 Palm 尚未触发录像时不会执行 MPEG
+编码。录像开始后，缩放和视频编码会使 CPU 占用高于表中基线，输出原始宽度
+（`--record-width 0`）时尤其明显，建议保留默认 `1280`。
+
+BPU 负责手掌检测和 21 点推理；MJPEG 解码、预处理、几何规则、画面绘制和视频
+编码主要消耗 CPU。`hrut_somstatus` 显示的是采样瞬间的 BPU 利用率，推理是间歇
+执行的，因此可能读到 `0%`，不能把单次读数理解为整段运行的平均值。整机负载
+还会受桌面、VS Code Remote 和其他后台服务影响，表格主要用于同一板卡上的
+相对比较。
+
+可用以下命令复测当前进程：
+
+```bash
+pid=$(pgrep -o -f '^/usr/bin/python3 -m gesture_x5.apps.gesture')
+top -p "$pid"
+ps -p "$pid" -o pid,etimes,%cpu,%mem,rss,args
+hrut_somstatus
+```
+
+如果仍需降低占用，优先使用 `--headless`，其次增大 `--detect-every`；不要把
+`--max-hands` 降为 `1`，否则双手 Palm 启动录像将无法成立。例如：
+
+```bash
+./run_gesture_opencv.sh \
+  --headless \
+  --compute-eye left \
+  --detect-every 3 \
+  --max-hands 2 \
+  --record-width 1280 \
+  --record-format mpeg
+```
 
 ## 9. 手势类别
 
