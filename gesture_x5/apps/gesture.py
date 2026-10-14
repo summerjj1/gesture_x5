@@ -1074,7 +1074,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--palm-start-seconds", type=float, default=3.0)
     parser.add_argument("--missing-alarm-seconds", type=float, default=5.0)
-    parser.add_argument("--thumb-stop-seconds", type=float, default=5.0)
+    parser.add_argument("--thumb-stop-seconds", type=float, default=4.0)
     parser.add_argument(
         "--gesture-grace-seconds",
         type=float,
