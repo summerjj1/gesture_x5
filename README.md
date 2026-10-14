@@ -12,7 +12,7 @@
 - 使用 X5 BPU ROI 推理运行 MediaPipe 21 点手部关键点模型。
 - 绘制手掌框、7 个手掌检测点、21 点骨架和置信度。
 - 默认使用即时几何规则分类手势，无 warmup；官方 `gestureDet` 时序模型仅作可选对比。
-- 双手 `Palm` 定时开始录像、双手消失报警、双手 `Thumb Up` 定时结束录像。
+- 双手 `Palm` 定时开始录像、双手消失报警、任意单手 `Thumb Up` 定时结束录像。
 - 录像保存无识别标注的原始画面，截图保留识别标注便于调试。
 - 提供本地 OpenCV 窗口、无 ROS 网页预览和可选 ROS 2/TROS 预览。
 
@@ -219,7 +219,7 @@ cd /home/sunrise/code/Gesture_X5
 ```text
 两只手同时保持 Palm 3 秒       → 开始录像
 录制中两只手同时消失 5 秒      → 红色画面报警 + 终端报警
-两只手同时保持 Thumb Up 4 秒   → 停止并保存录像
+任意单手保持 Thumb Up 4 秒     → 停止并保存录像
 ```
 
 录像和截图默认保存到：
@@ -287,7 +287,7 @@ cd /home/sunrise/code/Gesture_X5
 2. 录像期间完全检测不到手，连续 5 秒后显示红色
    `ALARM: BOTH HANDS LOST`，同时在运行终端输出报警并触发终端响铃。
 3. 任意一只手重新出现后解除“同时消失”报警。
-4. 左镜头内至少两只手同时为 `Thumb Up`，连续保持 4 秒后结束并保存录像。
+4. 左镜头内任意一只手为 `Thumb Up`，连续保持 4 秒后结束并保存录像。
 
 `Palm` 和 `Thumb Up` 计时默认都允许最多 1 秒的短暂漏检，因此单帧或少量帧
 识别为 `Unknown` 不会立即清空整个进度；超过容错时间才会重新计时。
@@ -463,7 +463,7 @@ MPEG正在编码时CPU占用会高于表中数值。整机占用还会受 VS Cod
 | `--control-eye` | `left` | 自动录像使用的控制镜头：`left` 或 `right` |
 | `--palm-start-seconds` | `3` | 双手 Palm 触发录像所需秒数 |
 | `--missing-alarm-seconds` | `5` | 双手同时消失触发报警所需秒数 |
-| `--thumb-stop-seconds` | `4` | 双手 Thumb Up 停止录像所需秒数 |
+| `--thumb-stop-seconds` | `4` | 任意单手 Thumb Up 停止录像所需秒数 |
 | `--gesture-grace-seconds` | `1` | Palm 和 Thumb Up 计时允许的短暂漏检秒数 |
 | `--no-auto-record` | 关闭 | 禁用自动录像和自动报警状态机 |
 | `--record [FILE]` | 关闭 | 启动时开始录制无标注原始画面，可指定文件 |

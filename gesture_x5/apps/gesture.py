@@ -221,13 +221,13 @@ class _LegacyGestureRecordController:
             self.alarm_reported = False
             self.status = f"AUTO REC: hands visible ({len(hands)})"
 
-        if thumb_count >= 2:
+        if thumb_count >= 1:
             if self.thumb_since is None:
                 self.thumb_since = now
             self.thumb_last_seen = now
             held = self.elapsed(self.thumb_since, now)
             self.status = (
-                f"AUTO STOP: 2 Thumb Up {min(held, self.thumb_seconds):.1f}/"
+                f"AUTO STOP: Thumb Up {min(held, self.thumb_seconds):.1f}/"
                 f"{self.thumb_seconds:.1f}s"
             )
             if held >= self.thumb_seconds:
@@ -1257,7 +1257,7 @@ def main() -> None:
         print(
             f"自动录像：{args.control_eye}镜头检测到双手 Palm "
             f"{args.palm_start_seconds:g}秒开始；双手消失 "
-            f"{args.missing_alarm_seconds:g}秒报警；双手 Thumb Up "
+            f"{args.missing_alarm_seconds:g}秒报警；任意单手 Thumb Up "
             f"{args.thumb_stop_seconds:g}秒结束"
         )
 

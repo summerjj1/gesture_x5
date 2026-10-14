@@ -123,13 +123,13 @@ class GestureRecordController:
             self.alarm_reported = False
             self.status = f"AUTO REC: hands visible ({len(hands)})"
 
-        if thumb_count >= 2:
+        if thumb_count >= 1:
             if self.thumb_since is None:
                 self.thumb_since = now
             self.thumb_last_seen = now
             held = self.elapsed(self.thumb_since, now)
             self.status = (
-                f"AUTO STOP: 2 Thumb Up {min(held, self.thumb_seconds):.1f}/"
+                f"AUTO STOP: Thumb Up {min(held, self.thumb_seconds):.1f}/"
                 f"{self.thumb_seconds:.1f}s"
             )
             if held >= self.thumb_seconds:

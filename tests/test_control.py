@@ -24,8 +24,19 @@ class GestureRecordControllerTest(TestCase):
         self.assertIsNone(controller.palm_since)
         self.assertEqual(controller.update(hands("Palm"), False, 3.2), (False, False))
 
-    def test_thumb_up_stops_recording_after_five_seconds(self):
-        controller = GestureRecordController(3.0, 5.0, 5.0, 1.0)
-        controller.update(hands("Thumb Up"), True, 10.0)
+    def test_single_thumb_up_stops_recording_after_four_seconds(self):
+        controller = GestureRecordController(3.0, 5.0, 4.0, 1.0)
+        controller.update(hands("Thumb Up", 1), True, 10.0)
         controller.update([], True, 10.5)
-        self.assertEqual(controller.update(hands("Thumb Up"), True, 15.1), (False, True))
+        self.assertEqual(
+            controller.update(hands("Thumb Up", 1), True, 14.1),
+            (False, True),
+        )
+
+    def test_single_thumb_up_does_not_stop_before_four_seconds(self):
+        controller = GestureRecordController(3.0, 5.0, 4.0, 1.0)
+        controller.update(hands("Thumb Up", 1), True, 20.0)
+        self.assertEqual(
+            controller.update(hands("Thumb Up", 1), True, 23.9),
+            (False, False),
+        )
