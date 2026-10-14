@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+
+/libhand_roi_bridge.so
+/recordings/
+/gesture_result.jpg
+
