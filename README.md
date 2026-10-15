@@ -602,7 +602,150 @@ http://192.168.0.160:8000
 
 正常结果应包含一个手掌和一套 21 点关键点。
 
-## 16. 常见问题
+## 16. 对接接口与返回字段
+
+以下是**当前代码实际提供的接口**。手势识别主程序是本地 Python/命令行应用；
+`run_camera_web.sh` 的 HTTP 服务只提供原始相机预览，不返回手势、关键点或录像
+事件 JSON。需要向其他进程推送识别结果时，可在 Python 调用处按下述字段自行
+序列化；目前没有版本化的手势 HTTP 协议。
+
+### 命令行：单图与持续运行
+
+第 10 节列出全部参数及默认值。单图调用示例：
+
+```bash
+./run_gesture_opencv.sh --image /path/to/image.jpg --eye full \
+  --output /tmp/gesture_result.jpg --headless
+```
+
+成功时写入带标注的 JPEG，并在标准输出打印
+`palms=N hands=N time=XX.XXms output=/tmp/gesture_result.jpg`；这行文字
+用于人工检查，不是稳定的机器解析格式，也不会输出各手的 21 点坐标。持续运行
+模式将无标注录像写到 `--record-dir`（默认 `recordings/`）；按键或自动状态机
+控制录像，录像事件也只打印到终端。需要逐帧结构化结果时使用下面的 Python
+接口。
+
+### Python：单帧手势推理
+
+在 RDK X5 上安装第 4 节依赖并编译 `build/libhand_roi_bridge.so` 后，可以直接
+调用 `BpuHandPipeline`。输入必须是 OpenCV 解码的 `uint8` BGR 图像，形状为
+`(高度, 宽度, 3)`；对双目拼接图像，应先取左半或右半再调用。
+
+```python
+import cv2
+from gesture_x5.apps.gesture import BpuHandPipeline
+
+image = cv2.imread("/path/to/left_eye.jpg")
+if image is None:
+    raise RuntimeError("无法读取图片")
+
+pipeline = BpuHandPipeline(
+    palm_score=0.5,
+    hand_score=0.35,
+    max_hands=2,
+    palm_tiles=2,
+    gesture_backend="rules",
+    gesture_model="",       # rules 模式不会加载此模型
+    gesture_score=0.5,       # 仅 official 模式使用
+)
+try:
+    palms, hands = pipeline.process(image, stream_id="left")
+    for hand in hands:
+        print(hand.gesture, hand.landmarks[8, :2], hand.score)
+finally:
+    pipeline.close()
+```
+
+`process(image, stream_id="default", bootstrap_gesture=False)` 返回
+`(palms, hands)`，两者均为列表；没有检测结果时返回空列表，不返回 `None`。
+`stream_id` 用于区分 `official` 时序分类器的不同画面；默认 `rules` 模式不需要
+跨帧跟踪。`bootstrap_gesture` 仅用于官方分类器的单图测试。
+
+| 返回对象 | 字段 | 类型与含义 |
+|---|---|---|
+| `Palm` | `box` | `(x1, y1, x2, y2)`，图像像素坐标，右下角为边界坐标 |
+| `Palm` | `score` | `float`，手掌检测分数 |
+| `Palm` | `keypoints` | `numpy.ndarray`，形状 `(7, 2)`，手掌检测点的像素 `x, y` |
+| `Hand` | `landmarks` | `numpy.ndarray`，形状 `(21, 3)`，每点的 `x, y, z`；`x/y` 是像素坐标，`z` 是模型深度值按 ROI 尺寸缩放后的量，不能直接当作物理距离 |
+| `Hand` | `score` | `float`，21 点手部模型的分数；低于 `hand_score` 的手不会进入 `hands` |
+| `Hand` | `handedness` | `float`，模型原始左右手分数；本项目没有据此输出确定的左/右手标签 |
+| `Hand` | `roi` | `(x1, y1, x2, y2)`，用于 21 点推理的图像像素区域 |
+| `Hand` | `gesture` | `str`，第 9 节列出的手势名称；无法分类为 `Unknown`；官方模式预热时为 `Warmup n/8` |
+| `Hand` | `gesture_score` | `float`；`rules` 模式固定为 `1.0`，**不是概率**；`official` 模式为模型分类分数，预热时为 `0.0` |
+| `Hand` | `track_id` | `int`；`rules` 模式为 `-1`；`official` 模式的临时轨迹编号，不能用作持久身份 ID |
+
+所有坐标均相对于传给 `process()` 的图像左上角。若输入是右半画面，想映射回
+`4000×1200` 原始拼接帧，需将 `box`、`roi`、`keypoints` 和 `landmarks` 的
+`x` 坐标加上半幅宽度（当前为 `2000`）。`palms` 是手掌候选，`hands` 是通过
+21 点分数阈值的结果，两个列表不保证一一对应。MediaPipe 的 21 点索引遵循
+常用顺序：`0` 为手腕，拇指指尖 `4`、食指指尖 `8`、中指指尖 `12`、无名指
+指尖 `16`、小指指尖 `20`。
+
+### Python：自动录像控制事件
+
+`GestureRecordController` 只计算状态和事件，不负责打开相机或写视频文件。
+调用方需要保存实际录像状态，并在每次更新后处理返回的 `(start, stop)`：
+
+```python
+import time
+from gesture_x5.core.control import GestureRecordController
+
+controller = GestureRecordController(3.0, 5.0, 4.0, 1.0)
+recording = False
+
+# 每帧用 pipeline.process(...) 得到当前控制视角的 hands。
+start, stop = controller.update(hands, recording, time.monotonic())
+if start:
+    recording = True   # 调用方在此创建录像文件
+if stop:
+    recording = False  # 调用方在此关闭并保存录像
+print(controller.alarm, controller.status)
+```
+
+| 输入/输出 | 类型 | 约定 |
+|---|---|---|
+| `hands` | `list` 或 `None` | 当前控制视角的手势对象列表，元素只需有 `gesture: str` 属性；`[]` 表示本帧检测到 0 只手，`None` 表示控制视角未参与计算且暂停状态机 |
+| `recording` | `bool` | 调用方当前是否在录像；状态机不会自行修改录像器 |
+| `now` | `float` | `time.monotonic()` 的秒数，连续调用必须使用同一时间基准 |
+| `start` | `bool` | 双手 `Palm` 满 3 秒时单次返回 `True`，调用方应启动录像 |
+| `stop` | `bool` | 录制中任意一手 `Thumb Up` 满 4 秒时单次返回 `True`，调用方应结束录像 |
+| `controller.alarm` | `bool` | 录制中 `hands == []` 满 5 秒后为 `True`；重新检测到手后恢复 `False` |
+| `controller.status` | `str` | 人类可读的进度/报警文字，不建议解析它来判断事件 |
+
+Palm 和 Thumb Up 的短暂漏检容差默认为 1 秒。调用方应持续传入每帧的检测
+结果；若推理隔帧执行，可复用最近一次结果，与主程序 `--detect-every` 的行为
+一致。`hands=None` 会重置计时与报警状态，不能用它表示“没有检测到手”。
+
+### HTTP：原始相机预览
+
+运行 `./run_camera_web.sh` 后，可从同一局域网访问：
+
+| 请求 | 返回内容 |
+|---|---|
+| `GET /` | HTML 预览页面，`Content-Type: text/html` |
+| `GET /status` | JSON，相机状态；`Content-Type: application/json` |
+| `GET /stream.mjpg?view=left&width=1280&fps=15&quality=80` | 持续的 MJPEG 流，`Content-Type: multipart/x-mixed-replace; boundary=frame`，每段为一张 JPEG |
+
+`/stream.mjpg` 的 `view` 可取 `full`（默认）、`left`、`right`；`width`
+默认 `1280`，限制在 `320–1920`；`fps` 默认 `15`，限制在 `1–30`；
+`quality` 默认 `80`，限制在 `40–95`。这些参数影响输出流，不改变相机
+采集参数。`/status` 的返回示例：
+
+```json
+{"opened": true, "error": "", "width": 4000, "height": 1200, "frame_id": 1234}
+```
+
+| JSON 字段 | 类型 | 含义 |
+|---|---|---|
+| `opened` | `bool` | 相机当前是否打开 |
+| `error` | `str` | 最近的相机错误；正常时通常为空字符串 |
+| `width` / `height` | `int` | 实际读取到的原始帧尺寸；首帧到达前为 `0` |
+| `frame_id` | `int` | 已读取帧计数，从 `0` 开始递增；不是时间戳 |
+
+这个 HTTP 服务不调用 BPU，也没有 `/gestures`、`/landmarks` 或录制控制端点。
+调用 Python 推理入口是当前获取结构化手势结果的方式。
+
+## 17. 常见问题
 
 ### 相机无法打开
 
@@ -688,7 +831,7 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
 v4l2-ctl -d /dev/video0 --get-fmt-video --get-parm
 ```
 
-## 17. 已验证状态
+## 18. 已验证状态
 
 - 相机：`4000x1200 MJPEG @ 60 FPS` 可正常协商。
 - 手掌模型：X5 BPU 推理正常。
